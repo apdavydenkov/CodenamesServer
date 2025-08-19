@@ -6,8 +6,8 @@ const path = require('path');
  */
 class AIGamesFileService {
   constructor() {
-    // Путь к файлу ai_games.json во frontend/public/dic/
-    this.filePath = path.join(__dirname, '..', 'frontend', 'public', 'dic', 'ai_games.json');
+    // Путь к файлу ai_games.json в data папке сервера
+    this.filePath = path.join(__dirname, 'data', 'ai_games.json');
   }
 
   /**

@@ -45,6 +45,11 @@ app.get("/stats", (req, res) => {
   res.json(gameStats.getStats());
 });
 
+// Роут для отдачи AI игр файла
+app.get("/dictionaries/ai_games.json", (req, res) => {
+  res.sendFile(path.join(__dirname, "data", "ai_games.json"));
+});
+
 // API эндпоинт для генерации ИИ-слов
 app.post('/api/generate-words', async (req, res) => {
   try {
