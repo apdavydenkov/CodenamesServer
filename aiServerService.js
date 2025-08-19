@@ -34,7 +34,7 @@ class AIServerService {
 
     try {
       const response = await axios.post(this.apiUrl, {
-        model: 'mistral-medium-2508',
+        model: 'mistral-large-latest',
         messages: [
           {
             role: 'user',
