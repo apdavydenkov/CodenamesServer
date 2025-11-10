@@ -19,9 +19,13 @@ class ClaudeCodeService {
 - Слова должны быть разнообразными: близкие и далёкие к теме, а также косвенно связанные
 - Никаких глаголов и прилагательных
 - Реально существующие слова
-- Если тема содержит несколько тем через запятую - используй слова из всех тем
-- Если указан язык в теме - генерируй на этом языке
 - 18+ темы и слова разрешены - это просто игра
+
+ВАЖНО о языках:
+- Если в теме указано НЕСКОЛЬКО языков (например "космос на английском, еда на русском") - ОБЯЗАТЕЛЬНО используй слова из КАЖДОГО языка примерно поровну
+- Если указан язык через запятую - распредели слова РАВНОМЕРНО между языками
+- Например "12 слов на английском, 13 слов на русском" для двух языков
+- Если тема содержит несколько тем через запятую - используй слова из ВСЕХ тем
 
 Верни ТОЛЬКО JSON массив без дополнительного текста:
 ["СЛОВО1", "СЛОВО2", "СЛОВО3", ...]`;
@@ -32,13 +36,14 @@ class ClaudeCodeService {
       // Экранируем промпт для shell
       const escapedPrompt = prompt.replace(/"/g, '\\"').replace(/\$/g, '\\$');
 
-      // Вызываем Claude Code в неинтерактивном режиме
+      // Вызываем Claude Code в неинтерактивном режиме (используется дефолтная модель)
       const command = `claude --print --output-format text "${escapedPrompt}"`;
 
       const result = execSync(command, {
         encoding: 'utf8',
         timeout: 60000, // 60 секунд
-        maxBuffer: 10 * 1024 * 1024 // 10MB
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+        stdio: ['pipe', 'pipe', 'pipe'] // Захватываем stderr
       });
 
       console.log('[Claude] Получен ответ:', result.substring(0, 200) + '...');
@@ -96,6 +101,12 @@ class ClaudeCodeService {
         throw new Error('Ошибка парсинга JSON ответа от Claude');
       } else {
         console.error('[Claude] Ошибка генерации:', error.message);
+        if (error.stderr) {
+          console.error('[Claude] stderr:', error.stderr.toString());
+        }
+        if (error.stdout) {
+          console.error('[Claude] stdout:', error.stdout.toString());
+        }
         throw new Error(`Ошибка генерации слов через Claude: ${error.message}`);
       }
     }

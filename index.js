@@ -6,6 +6,8 @@ const path = require("path");
 const { GameStatsFactory } = require("./stats");
 const ClaudeCodeService = require('./claudeCodeService');
 const AIGamesFileService = require('./aiGamesFileService');
+const ChatService = require('./chatService');
+const AuthService = require('./authService');
 const { generateAIKey } = require('./keyGenerator');
 
 const app = express();
@@ -20,6 +22,8 @@ const io = new Server(httpServer, {
 const gameStats = GameStatsFactory.create();
 const claudeService = new ClaudeCodeService();
 const aiGamesFile = new AIGamesFileService();
+const chatService = new ChatService();
+const authService = new AuthService();
 
 // CORS middleware
 app.use((req, res, next) => {
@@ -91,6 +95,105 @@ app.post('/api/generate-words', async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+});
+
+// === AUTH API ENDPOINTS ===
+
+// Проверка существования пользователя
+app.post('/api/auth/check-user', async (req, res) => {
+  try {
+    const { username } = req.body;
+    const result = await authService.checkUser(username);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Регистрация нового пользователя
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { userId, username } = req.body;
+    const result = await authService.registerUser(userId, username);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Проверка PIN-кода
+app.post('/api/auth/verify-pin', async (req, res) => {
+  try {
+    const { username, pin } = req.body;
+    const result = await authService.verifyPin(username, pin);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Получение пользователя
+app.post('/api/auth/get-user', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const result = await authService.getUser(userId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Смена имени
+app.post('/api/auth/change-name', async (req, res) => {
+  try {
+    const { userId, newUsername, pin } = req.body;
+
+    // Проверяем наличие PIN
+    if (!pin) {
+      console.log(`[Auth API] ❌ Missing PIN in change-name request`);
+      return res.status(400).json({ success: false, error: 'PIN не указан' });
+    }
+
+    // Получаем текущего пользователя
+    const userResult = await authService.getUser(userId);
+    if (!userResult.success) {
+      console.log(`[Auth API] ❌ User not found: ${userId}`);
+      return res.status(404).json({ success: false, error: 'Пользователь не найден' });
+    }
+
+    const currentUsername = userResult.user.username;
+
+    // Проверяем PIN
+    const authResult = await authService.verifyPin(currentUsername, pin);
+    if (!authResult.success || authResult.user_id !== userId) {
+      console.log(`[Auth API] ❌ Invalid PIN for user ${currentUsername} (${userId})`);
+      return res.status(403).json({ success: false, error: 'Неверный PIN-код' });
+    }
+
+    console.log(`[Auth API] ✅ PIN verified for ${currentUsername}`);
+
+    const result = await authService.changeName(userId, newUsername);
+
+    // Если смена имени успешна, обновляем имя во всех сообщениях чата
+    if (result.success) {
+      await chatService.updateUsernameInMessages(userId, result.newUsername);
+    }
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Смена PIN-кода
+app.post('/api/auth/change-pin', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const result = await authService.changePin(userId);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -276,6 +379,95 @@ io.on("connection", (socket) => {
     console.log("Client disconnected:", socket.id);
     leaveCurrentGame();
   });
+
+  // === CHAT EVENTS ===
+
+  // Присоединиться к чату игры
+  socket.on("JOIN_CHAT", async ({ gameKey }) => {
+    try {
+      console.log(`[Chat] ${socket.id} joining chat for game: ${gameKey}`);
+
+      // Присоединяем к комнате чата (можем быть в нескольких одновременно)
+      const chatRoom = `chat_${gameKey}`;
+      socket.join(chatRoom);
+      console.log(`[Chat] ${socket.id} joined room: ${chatRoom}`);
+
+      // Загружаем историю чата
+      const messages = await chatService.getMessages(gameKey, 100);
+
+      // Отправляем историю клиенту с указанием gameKey
+      socket.emit("CHAT_HISTORY", { gameKey, messages });
+
+      console.log(`[Chat] Sent ${messages.length} messages (${gameKey}) to ${socket.id}`);
+    } catch (error) {
+      console.error("[Chat] Error loading chat history:", error);
+      socket.emit("CHAT_ERROR", { message: "Failed to load chat history" });
+    }
+  });
+
+  // Отправить сообщение в чат
+  socket.on("SEND_MESSAGE", async ({ gameKey, userId, author, text, pin }) => {
+    try {
+      console.log(`[Chat] Message from ${author} (${userId}) in ${gameKey}`);
+
+      // Валидация userId
+      if (!userId) {
+        socket.emit("CHAT_ERROR", { message: "User not authenticated" });
+        console.error("[Chat] Missing userId");
+        return;
+      }
+
+      // Валидация PIN
+      if (!pin) {
+        socket.emit("CHAT_ERROR", { message: "PIN not provided" });
+        console.error("[Chat] Missing PIN");
+        return;
+      }
+
+      // Проверяем PIN через authService
+      const authResult = await authService.verifyPin(author, pin);
+
+      if (!authResult.success) {
+        socket.emit("CHAT_ERROR", { message: "Invalid PIN" });
+        console.error(`[Chat] Invalid PIN for user ${author}`);
+        return;
+      }
+
+      if (authResult.user_id !== userId) {
+        socket.emit("CHAT_ERROR", { message: "User ID mismatch" });
+        console.error(`[Chat] User ID mismatch: expected ${authResult.user_id}, got ${userId}`);
+        return;
+      }
+
+      console.log(`[Chat] ✅ PIN verified for ${author}`);
+
+      // Валидация текста
+      if (!text || !text.trim()) {
+        socket.emit("CHAT_ERROR", { message: "Message cannot be empty" });
+        return;
+      }
+
+      if (text.length > 500) {
+        socket.emit("CHAT_ERROR", { message: "Message too long (max 500 chars)" });
+        return;
+      }
+
+      // Добавляем сообщение с userId (gameKey уже добавляется в chatService)
+      const message = await chatService.addMessage(
+        gameKey,
+        userId,
+        author || "Anonymous",
+        text.trim()
+      );
+
+      // Отправляем всем в комнате чата
+      console.log(`[Chat] Broadcasting message to chat_${gameKey}:`, message.id);
+      io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", message);
+    } catch (error) {
+      console.error("[Chat] Error sending message:", error);
+      socket.emit("CHAT_ERROR", { message: "Failed to send message" });
+    }
+  });
 });
 
 setInterval(() => {
@@ -296,6 +488,11 @@ setInterval(() => {
   console.log("Games cleaned:", cleanedGames);
   console.log("Remaining games:", activeGames.size);
   console.log("=== END CLEANUP ===\n");
+
+  // Очистка старых чатов
+  chatService.cleanupOldChats().catch(err =>
+    console.error("[Chat] Cleanup error:", err)
+  );
 }, 3600000);
 
 const PORT = process.env.PORT;
