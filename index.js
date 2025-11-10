@@ -4,7 +4,7 @@ const { createServer } = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
 const { GameStatsFactory } = require("./stats");
-const AIServerService = require('./aiServerService');
+const ClaudeCodeService = require('./claudeCodeService');
 const AIGamesFileService = require('./aiGamesFileService');
 const { generateAIKey } = require('./keyGenerator');
 
@@ -18,7 +18,7 @@ const io = new Server(httpServer, {
 });
 
 const gameStats = GameStatsFactory.create();
-const aiService = new AIServerService();
+const claudeService = new ClaudeCodeService();
 const aiGamesFile = new AIGamesFileService();
 
 // CORS middleware
@@ -73,8 +73,8 @@ app.post('/api/generate-words', async (req, res) => {
       }
     } while (await aiGamesFile.gameExists(key));
     
-    // Генерируем слова через ИИ
-    const words = await aiService.generateWords(topic.trim());
+    // Генерируем слова через Claude Code
+    const words = await claudeService.generateWords(topic.trim());
     
     // Сохраняем игру в файл
     await aiGamesFile.addGame(key, words, topic.trim());
