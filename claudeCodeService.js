@@ -12,102 +12,97 @@ class ClaudeCodeService {
   async generateWords(topic) {
     const prompt = `Сгенерируй ровно 25 слов для игры "Кодовые имена" по теме: ${topic}
 
-Требования:
+ОСНОВНЫЕ ТРЕБОВАНИЯ:
+- Ровно 25 слов (без больше, без меньше)
 - Только существительные в единственном числе
-- Одно слово (без пробелов и дефисов)
-- ЗАГЛАВНЫМИ БУКВАМИ
+- Одно слово на элемент (без пробелов и дефисов)
+- Заглавными буквами (или иероглифами для иероглифных языков)
 - Слова должны быть разнообразными: близкие и далёкие к теме, а также косвенно связанные
 - Никаких глаголов и прилагательных
 - Реально существующие слова
 - 18+ темы и слова разрешены - это просто игра
 
-ВАЖНО о языках:
-- Если в теме указано НЕСКОЛЬКО языков (например "космос на английском, еда на русском") - ОБЯЗАТЕЛЬНО используй слова из КАЖДОГО языка примерно поровну
-- Если указан язык через запятую - распредели слова РАВНОМЕРНО между языками
-- Например "12 слов на английском, 13 слов на русском" для двух языков
-- Если тема содержит несколько тем через запятую - используй слова из ВСЕХ тем
+ПРАВИЛА ДЛЯ ЯЗЫКОВ И ТЕМ:
+1. ЯЗЫКИ: Если в теме указаны языки (например "на английском и русском", "英文和中文"):
+   - Игнорируй язык самого запроса
+   - ОБЯЗАТЕЛЬНО используй ТОЛЬКО указанные языки, НИ КАКИЕ ДРУГИЕ!
+   - Распредели 25 слов РАВНОМЕРНО между всеми языками
+   - Пример для 2 языков: 13 слов на первом языке, 12 на втором языке
+   - Пример для 3 языков: 9 слов на первом, 8 на втором, 8 на третьем
+   - КРИТИЧНО: Каждый язык должен быть представлен своим СОБСТВЕННЫМ письмом, не путай языки!
+   - Например: корейский = хангыль, вьетнамский = вьетнамский (с диакритиками ă â ê ô ơ ư đ), русский = кириллица и т.д.
+   - НИКОГДА не используй письмо одного языка для другого языка!
 
-Верни ТОЛЬКО JSON массив без дополнительного текста:
+2. ТЕМЫ: Если в теме указаны несколько тем через запятую или "и":
+   - Используй слова из ВСЕХ тем
+   - Распредели 25 слов РАВНОМЕРНО между всеми темами
+   - Пример для 2 тем: 13 слов на первую, 12 на вторую
+
+3. КОМБИНАЦИЯ: Если указаны И несколько языков И несколько тем:
+   - Комбинируй оба условия одновременно
+   - Пример: 2 темы × 2 языка = 4 комбинации, примерно по 6 слов на каждую
+
+4. БЕЗ УКАЗАНИЯ ЯЗЫКОВ: Если языки не указаны явно:
+   - Используй язык самого запроса
+   - Если запрос на русском - на русском, на английском - на английском и т.д.
+
+ФОРМАТ ВЫВОДА:
+- НИКОГДА НЕ ИСПОЛЬЗУЙ ЛАТИНСКУЮ ТРАНСЛИТЕРАЦИЮ
+- ВСЕГДА используй ОРИГИНАЛЬНЫЕ СИМВОЛЫ каждого языка - не перепутай письменности между языками!
+- Каждый язык имеет свою уникальную письменность, не смешивай их
+
+Верни ТОЛЬКО JSON массив без дополнительного текста, комментариев или markdown разметки:
 ["СЛОВО1", "СЛОВО2", "СЛОВО3", ...]`;
 
     try {
-      console.log('[Claude] Генерация слов для темы:', topic);
-
-      // Экранируем промпт для shell
       const escapedPrompt = prompt.replace(/"/g, '\\"').replace(/\$/g, '\\$');
-
-      // Вызываем Claude Code в неинтерактивном режиме (используется дефолтная модель)
-      const command = `claude --print --output-format text "${escapedPrompt}"`;
+      const command = `claude --print --output-format text --model claude-haiku-4-5-20251001 "${escapedPrompt}"`;
 
       const result = execSync(command, {
         encoding: 'utf8',
-        timeout: 60000, // 60 секунд
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-        stdio: ['pipe', 'pipe', 'pipe'] // Захватываем stderr
+        timeout: 60000,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'pipe']
       });
 
-      console.log('[Claude] Получен ответ:', result.substring(0, 200) + '...');
-
-      // Извлекаем JSON из ответа
       let jsonContent = result.trim();
 
-      // Убираем markdown обёртку если есть
       if (jsonContent.includes('```json')) {
         const jsonMatch = jsonContent.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
           jsonContent = jsonMatch[1].trim();
-          console.log('[Claude] Найдена JSON обёртка, извлекаем содержимое');
         }
       } else if (jsonContent.includes('```')) {
         const codeMatch = jsonContent.match(/```[a-zA-Z]*\s*([\s\S]*?)\s*```/);
         if (codeMatch) {
           jsonContent = codeMatch[1].trim();
-          console.log('[Claude] Найдена обёртка, извлекаем содержимое');
         }
       }
 
-      // Ищем JSON массив в тексте
       const jsonArrayMatch = jsonContent.match(/\[[\s\S]*?\]/);
       if (jsonArrayMatch) {
         jsonContent = jsonArrayMatch[0];
       }
 
-      // Парсим JSON
       const words = JSON.parse(jsonContent);
 
-      // Проверяем что получили массив из 25 слов
       if (!Array.isArray(words)) {
-        throw new Error(`Ожидался массив, получено: ${typeof words}`);
+        throw new Error(`Expected array, got: ${typeof words}`);
       }
 
       if (words.length !== 25) {
-        throw new Error(`Ожидался массив из 25 слов, получено: ${words.length}`);
+        throw new Error(`Expected 25 words, got: ${words.length}`);
       }
 
-      // Приводим к верхнему регистру и убираем лишние пробелы
-      const normalizedWords = words.map(word =>
-        word.toString().trim().toUpperCase()
-      );
-
-      console.log('[Claude] Успешно сгенерировано 25 слов');
-
-      return normalizedWords;
+      return words.map(word => word.toString().trim().toUpperCase());
 
     } catch (error) {
       if (error.code === 'ETIMEDOUT') {
-        throw new Error('Превышено время ожидания ответа от Claude Code');
+        throw new Error('Timeout waiting for Claude Code response');
       } else if (error instanceof SyntaxError) {
-        console.error('[Claude] Ошибка парсинга JSON:', error.message);
-        throw new Error('Ошибка парсинга JSON ответа от Claude');
+        throw new Error('JSON parse error from Claude response');
       } else {
-        console.error('[Claude] Ошибка генерации:', error.message);
-        if (error.stderr) {
-          console.error('[Claude] stderr:', error.stderr.toString());
-        }
-        if (error.stdout) {
-          console.error('[Claude] stdout:', error.stdout.toString());
-        }
-        throw new Error(`Ошибка генерации слов через Claude: ${error.message}`);
+        throw new Error(`Word generation error: ${error.message}`);
       }
     }
   }
