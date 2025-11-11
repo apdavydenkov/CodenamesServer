@@ -159,7 +159,6 @@ class GameStatsService {
         this.checkAndResetPeriods();
       }
     } catch (error) {
-      console.error('Error loading stats:', error);
       this.stats = StatsPeriodManager.createInitialStats();
     }
   }
@@ -185,7 +184,6 @@ class GameStatsService {
       await this.repository.save(this.stats);
       this.isDirty = false;
     } catch (error) {
-      console.error('Error saving stats:', error);
     }
   }
   
@@ -253,8 +251,5 @@ class GameStatsFactory {
 }
 
 module.exports = {
-  GameStatsService,
-  FileStatsRepository,
-  StatsPeriodManager,
   GameStatsFactory
 };

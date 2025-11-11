@@ -48,7 +48,6 @@ class ChatService {
       const filePath = this.getChatFilePath(gameKey);
       await fs.writeFile(filePath, JSON.stringify(chatData, null, 2), 'utf8');
     } catch (error) {
-      console.error('[Chat] Error saving chat history:', error);
       throw error;
     }
   }
@@ -79,7 +78,6 @@ class ChatService {
 
     await this.saveChatHistory(gameKey, chatData);
 
-    console.log('[Chat] Message added:', { gameKey, userId, author });
 
     return message;
   }
@@ -116,9 +114,7 @@ class ChatService {
         }
       }
 
-      console.log(`[Chat] Updated username for userId ${userId}: ${updatedMessagesCount} messages in ${updatedFilesCount} chats`);
     } catch (error) {
-      console.error('[Chat] Error updating username in messages:', error);
       throw error;
     }
   }
@@ -155,11 +151,9 @@ class ChatService {
 
         if (now - stats.mtime.getTime() > maxAge) {
           await fs.unlink(filePath);
-          console.log(`[Chat] Deleted old chat file: ${file}`);
         }
       }
     } catch (error) {
-      console.error('[Chat] Error cleaning up old chats:', error);
     }
   }
 }
