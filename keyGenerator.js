@@ -27,16 +27,6 @@ function generateAIKey() {
   return key.join('');
 }
 
-/**
- * Проверка является ли ключ ИИ-ключом
- * @param {string} key - ключ для проверки
- * @returns {boolean}
- */
-function isAIKey(key) {
-  return key && key.length === 7 && key[6] === 'Н';
-}
-
 module.exports = {
-  generateAIKey,
-  isAIKey
+  generateAIKey
 };

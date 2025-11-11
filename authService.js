@@ -17,7 +17,6 @@ class AuthService {
         await fs.writeFile(this.usersFile, JSON.stringify({ users: [] }, null, 2));
       }
     } catch (error) {
-      console.error('[Auth] Error creating data directory:', error);
     }
   }
 
@@ -26,7 +25,6 @@ class AuthService {
       const data = await fs.readFile(this.usersFile, 'utf8');
       return JSON.parse(data);
     } catch (error) {
-      console.error('[Auth] Error loading users:', error);
       return { users: [] };
     }
   }
@@ -35,7 +33,6 @@ class AuthService {
     try {
       await fs.writeFile(this.usersFile, JSON.stringify(data, null, 2));
     } catch (error) {
-      console.error('[Auth] Error saving users:', error);
       throw error;
     }
   }
@@ -98,7 +95,6 @@ class AuthService {
     data.users.push(newUser);
     await this.saveUsers(data);
 
-    console.log(`[Auth] New user registered: ${sanitizedName} (${userId})`);
     return { success: true, pin: pin };
   }
 
@@ -108,7 +104,6 @@ class AuthService {
     const user = data.users.find(u => u.username === username && u.pin === pin);
 
     if (user) {
-      console.log(`[Auth] User restored: ${username} (${user.user_id})`);
       return {
         success: true,
         user_id: user.user_id,
@@ -163,32 +158,26 @@ class AuthService {
 
   // Смена имени пользователя
   async changeName(userId, newUsername) {
-    console.log(`[Auth] 🔄 Change name request: userId=${userId}, newUsername="${newUsername}"`);
 
     // Валидация и санитизация
     const validation = this.validateUsername(newUsername);
     if (!validation.valid) {
-      console.log(`[Auth] ❌ Validation failed: ${validation.error}`);
       return { success: false, error: validation.error };
     }
 
     const sanitizedName = validation.sanitized;
-    console.log(`[Auth] ✅ Name sanitized: "${sanitizedName}"`);
 
     const data = await this.loadUsers();
-    console.log(`[Auth] 📂 Loaded ${data.users.length} users`);
 
     // Проверяем, не занято ли новое имя другим пользователем
     const existingUser = data.users.find(u => u.username === sanitizedName && u.user_id !== userId);
     if (existingUser) {
-      console.log(`[Auth] ❌ Name already taken by user: ${existingUser.user_id}`);
       return { success: false, error: 'Имя уже занято' };
     }
 
     // Находим пользователя
     const user = data.users.find(u => u.user_id === userId);
     if (!user) {
-      console.log(`[Auth] ❌ User not found: ${userId}`);
       return { success: false, error: 'Пользователь не найден' };
     }
 
@@ -196,7 +185,6 @@ class AuthService {
     user.username = sanitizedName;
     await this.saveUsers(data);
 
-    console.log(`[Auth] ✅ User renamed: ${oldUsername} -> ${sanitizedName} (${userId})`);
     return { success: true, oldUsername, newUsername: sanitizedName };
   }
 
@@ -213,7 +201,6 @@ class AuthService {
     user.pin = newPin;
     await this.saveUsers(data);
 
-    console.log(`[Auth] PIN changed for user: ${user.username} (${userId})`);
     return { success: true, pin: newPin };
   }
 }
