@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Test Teams</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        button { margin: 5px; padding: 10px; }
+        .log { background: #f0f0f0; padding: 10px; margin: 10px 0; max-height: 400px; overflow-y: auto; }
+        .success { color: green; }
+        .error { color: red; }
+        .info { color: blue; }
+    </style>
+</head>
+<body>
+    <h1>Test Teams API</h1>
+
+    <div>
+        <label>Game Key: <input id="gameKey" value="TESTGAME" /></label>
+        <label>User ID: <input id="userId" value="user_123" /></label>
+        <label>Username: <input id="username" value="TestUser" /></label>
+    </div>
+
+    <h3>Actions:</h3>
+    <button onclick="joinBluePlayer()">Join Blue Team (Player)</button>
+    <button onclick="joinBlueCaptain()">Join Blue Team (Captain)</button>
+    <button onclick="joinRedPlayer()">Join Red Team (Player)</button>
+    <button onclick="joinRedCaptain()">Join Red Team (Captain)</button>
+    <button onclick="joinSpectator()">Join Spectator</button>
+    <br>
+    <button onclick="leaveCaptain()">Leave Captain</button>
+    <button onclick="lockTeams()">Lock/Unlock Teams</button>
+    <button onclick="setPrivate(true)">Make Private</button>
+    <button onclick="setPrivate(false)">Make Public</button>
+
+    <h3>Log:</h3>
+    <div class="log" id="log"></div>
+
+    <script>
+        const socket = io('http://localhost:3050');
+
+        function log(msg, type = 'info') {
+            const div = document.getElementById('log');
+            const span = document.createElement('div');
+            span.className = type;
+            span.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            div.appendChild(span);
+            div.scrollTop = div.scrollHeight;
+        }
+
+        socket.on('connect', () => {
+            log('Connected to server', 'success');
+        });
+
+        socket.on('TEAMS_UPDATE', (data) => {
+            log('TEAMS_UPDATE: ' + JSON.stringify(data, null, 2), 'success');
+        });
+
+        socket.on('JOIN_TEAM_SUCCESS', (data) => {
+            log('JOIN_TEAM_SUCCESS: ' + JSON.stringify(data), 'success');
+        });
+
+        socket.on('LEAVE_CAPTAIN_SUCCESS', (data) => {
+            log('LEAVE_CAPTAIN_SUCCESS: ' + JSON.stringify(data), 'success');
+        });
+
+        socket.on('GAME_SETTINGS_UPDATE', (data) => {
+            log('GAME_SETTINGS_UPDATE: ' + JSON.stringify(data), 'success');
+        });
+
+        socket.on('GAME_ERROR', (error) => {
+            log('GAME_ERROR: ' + error.message + ' (' + error.code + ')', 'error');
+        });
+
+        socket.on('NEW_MESSAGE', (msg) => {
+            log('CHAT: ' + msg.text, 'info');
+        });
+
+        function getParams() {
+            return {
+                gameKey: document.getElementById('gameKey').value,
+                userId: document.getElementById('userId').value,
+                username: document.getElementById('username').value
+            };
+        }
+
+        function joinBluePlayer() {
+            const params = getParams();
+            socket.emit('JOIN_TEAM', { ...params, team: 'blue', role: 'player' });
+            log('Sent: JOIN_TEAM blue player');
+        }
+
+        function joinBlueCaptain() {
+            const params = getParams();
+            socket.emit('JOIN_TEAM', { ...params, team: 'blue', role: 'captain' });
+            log('Sent: JOIN_TEAM blue captain');
+        }
+
+        function joinRedPlayer() {
+            const params = getParams();
+            socket.emit('JOIN_TEAM', { ...params, team: 'red', role: 'player' });
+            log('Sent: JOIN_TEAM red player');
+        }
+
+        function joinRedCaptain() {
+            const params = getParams();
+            socket.emit('JOIN_TEAM', { ...params, team: 'red', role: 'captain' });
+            log('Sent: JOIN_TEAM red captain');
+        }
+
+        function joinSpectator() {
+            const params = getParams();
+            socket.emit('JOIN_TEAM', { ...params, team: 'spectator', role: 'spectator' });
+            log('Sent: JOIN_TEAM spectator');
+        }
+
+        function leaveCaptain() {
+            const params = getParams();
+            socket.emit('LEAVE_CAPTAIN', { gameKey: params.gameKey, userId: params.userId });
+            log('Sent: LEAVE_CAPTAIN');
+        }
+
+        function lockTeams() {
+            const params = getParams();
+            socket.emit('LOCK_TEAMS', { gameKey: params.gameKey, userId: params.userId });
+            log('Sent: LOCK_TEAMS');
+        }
+
+        function setPrivate(isPrivate) {
+            const params = getParams();
+            socket.emit('SET_PRIVATE', { gameKey: params.gameKey, userId: params.userId, isPrivate });
+            log('Sent: SET_PRIVATE ' + isPrivate);
+        }
+    </script>
+</body>
+</html>

@@ -538,9 +538,16 @@ io.on("connection", (socket) => {
       game.teams.spectators.add(userId);
       game.userToTeam.set(userId, { team: "spectator", role: "spectator", username });
 
+      // Обновить команду во всех предыдущих сообщениях
+      await chatService.updateUserTeamInMessages(gameKey, userId, 'spectator', 'spectator');
+
       const msg = `Я стал наблюдателем`;
       const savedMsg = await chatService.addMessage(gameKey, userId, username, msg, 'spectator', 'spectator');
       io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
+
+      // Отправить обновлённую историю всем клиентам
+      const updatedMessages = await chatService.getMessages(gameKey);
+      io.to(`chat_${gameKey}`).emit("CHAT_HISTORY", updatedMessages);
 
       io.to(gameKey).emit("TEAMS_UPDATE", { teams: serializeTeams(game) });
       socket.emit("JOIN_TEAM_SUCCESS", { team, role: "spectator" });
@@ -563,16 +570,20 @@ io.on("connection", (socket) => {
         game.teams[team].players.add(userId);
         game.userToTeam.set(userId, { team, role: "player", username });
 
+        // Обновить команду во всех предыдущих сообщениях
+        await chatService.updateUserTeamInMessages(gameKey, userId, team, 'player');
+
         io.to(gameKey).emit("TEAMS_UPDATE", { teams: serializeTeams(game) });
         socket.emit("JOIN_TEAM_SUCCESS", { team, role: "player" });
 
-        const teamRu = team === "blue" ? "синюю" : "красную";
+        const teamRu = team === "blue" ? "синей" : "красной";
         const msg = `Я вступил в ${teamRu} команду`;
         const savedMsg = await chatService.addMessage(gameKey, userId, username, msg, team, 'player');
         io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
-        // Сохраняем состояние игры
-        saveGameStateAsync(gameKey, game);
+        // Отправить обновлённую историю всем клиентам
+        const updatedMessages = await chatService.getMessages(gameKey);
+        io.to(`chat_${gameKey}`).emit("CHAT_HISTORY", updatedMessages);
 
         console.log(`⚠️ Captain taken, ${username} joined as player`);
         return;
@@ -582,13 +593,17 @@ io.on("connection", (socket) => {
       game.teams[team].captainName = username;
       game.userToTeam.set(userId, { team, role: "captain", username });
 
+      // Обновить команду во всех предыдущих сообщениях
+      await chatService.updateUserTeamInMessages(gameKey, userId, team, 'captain');
+
       const teamRu = team === "blue" ? "синей" : "красной";
       const msg = `Я стал капитаном ${teamRu} команды`;
       const savedMsg = await chatService.addMessage(gameKey, userId, username, msg, team, 'captain');
       io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
-      // Сохраняем состояние игры
-      saveGameStateAsync(gameKey, game);
+      // Отправить обновлённую историю всем клиентам
+      const updatedMessages = await chatService.getMessages(gameKey);
+      io.to(`chat_${gameKey}`).emit("CHAT_HISTORY", updatedMessages);
 
       io.to(gameKey).emit("TEAMS_UPDATE", { teams: serializeTeams(game) });
       socket.emit("JOIN_TEAM_SUCCESS", { team, role: "captain" });
@@ -601,13 +616,17 @@ io.on("connection", (socket) => {
       game.teams[team].players.add(userId);
       game.userToTeam.set(userId, { team, role: "player", username });
 
-      const teamRu = team === "blue" ? "синюю" : "красную";
+      // Обновить команду во всех предыдущих сообщениях
+      await chatService.updateUserTeamInMessages(gameKey, userId, team, 'player');
+
+      const teamRu = team === "blue" ? "синей" : "красной";
       const msg = `Я вступил в ${teamRu} команду`;
       const savedMsg = await chatService.addMessage(gameKey, userId, username, msg, team, 'player');
       io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
-      // Сохраняем состояние игры
-      saveGameStateAsync(gameKey, game);
+      // Отправить обновлённую историю всем клиентам
+      const updatedMessages = await chatService.getMessages(gameKey);
+      io.to(`chat_${gameKey}`).emit("CHAT_HISTORY", updatedMessages);
 
       io.to(gameKey).emit("TEAMS_UPDATE", { teams: serializeTeams(game) });
       socket.emit("JOIN_TEAM_SUCCESS", { team, role: "player" });
@@ -643,9 +662,6 @@ io.on("connection", (socket) => {
 
     const teamRu = team === "blue" ? "синей" : "красной";
     const msg = `Я снял с себя полномочия капитана. Роль капитана ${teamRu} команды свободна.`;
-    // Сохраняем состояние игры
-    saveGameStateAsync(gameKey, game);
-
     const savedMsg = await chatService.addMessage(gameKey, userId, userTeam.username, msg, team, 'player');
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
@@ -671,10 +687,6 @@ io.on("connection", (socket) => {
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
     io.to(gameKey).emit("GAME_SETTINGS_UPDATE", { teamsLocked: game.teamsLocked });
-
-    // Сохраняем состояние игры
-    saveGameStateAsync(gameKey, game);
-
     console.log(`✅ Teams locked: ${game.teamsLocked}`);
   });
 
@@ -695,10 +707,6 @@ io.on("connection", (socket) => {
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
     io.to(gameKey).emit("GAME_SETTINGS_UPDATE", { isPrivate: game.isPrivate });
-
-    // Сохраняем состояние игры
-    saveGameStateAsync(gameKey, game);
-
     console.log(`✅ Game private: ${game.isPrivate}`);
   });
 
@@ -810,21 +818,7 @@ io.on("connection", (socket) => {
       console.log(`🏆 Game completed! Winner: ${game.winner}, Duration: ${Math.floor(duration / 1000)}s, Moves: ${game.totalMoves}`);
     }
 
-    const state = {
-      words: game.words,
-      colors: game.colors,
-      revealed: game.revealed,
-      currentTeam: game.currentTeam,
-      remainingCards: game.remainingCards,
-      gameOver: game.gameOver,
-      winner: game.winner,
-      teams: serializeTeams(game),
-      ownerId: game.ownerId,
-      isPrivate: game.isPrivate,
-      teamsLocked: game.teamsLocked
-    };
-
-    io.to(gameKey).emit("GAME_STATE", state);
+    io.to(gameKey).emit("GAME_STATE", game);
     console.log("Game state sent to room");
     console.log("=== END REVEAL_CARD ===\n");
   });
@@ -906,31 +900,12 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Получаем команду и роль пользователя
-      let userTeam = null;
-      let userRole = null;
-      const game = activeGames.get(gameKey);
-      if (game) {
-        const teamInfo = game.userToTeam.get(userId);
-        if (teamInfo) {
-          userTeam = teamInfo.team;
-          userRole = teamInfo.role;
-          console.log(`[Chat] User ${author} is in team: ${userTeam}, role: ${userRole}`);
-        } else {
-          console.log(`[Chat] User ${author} has no team assigned`);
-        }
-      } else {
-        console.log(`[Chat] Game ${gameKey} not found in activeGames`);
-      }
-
-      // Добавляем сообщение с userId, team и role
+      // Добавляем сообщение с userId (gameKey уже добавляется в chatService)
       const message = await chatService.addMessage(
         gameKey,
         userId,
         author || "Anonymous",
-        text.trim(),
-        userTeam,
-        userRole
+        text.trim()
       );
 
       // Учитываем сообщение в статистике
