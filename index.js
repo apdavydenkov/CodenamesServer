@@ -49,6 +49,18 @@ app.get("/stats", (req, res) => {
   res.json(gameStats.getStats());
 });
 
+// Получение исторических данных
+app.get("/stats/history/:period", (req, res) => {
+  try {
+    const { period } = req.params;
+    const { limit, offset } = req.query;
+    const history = gameStats.getHistory(period, { limit, offset });
+    res.json({ period, count: history.length, data: history });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 // Роут для отдачи AI игр файла
 app.get("/dictionaries/ai_games.json", (req, res) => {
   res.sendFile(path.join(__dirname, "data", "ai_games.json"));
@@ -79,10 +91,14 @@ app.post('/api/generate-words', async (req, res) => {
     
     // Генерируем слова через Claude Code
     const words = await claudeService.generateWords(topic.trim());
-    
+
     // Сохраняем игру в файл
     await aiGamesFile.addGame(key, words, topic.trim());
-    
+
+    // Учитываем только AI-генерацию (игра будет считаться как запущенная при первом ходе)
+    gameStats.addAiGeneration();
+    console.log("✅ AI game generated (will count as started on first card flip)");
+
     res.json({
       success: true,
       key: key,
@@ -116,6 +132,12 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { userId, username } = req.body;
     const result = await authService.registerUser(userId, username);
+
+    // Учитываем регистрацию в статистике
+    if (result.success) {
+      gameStats.addUser();
+    }
+
     res.json(result);
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -231,11 +253,25 @@ const createNewGameState = (gameKey, words = [], colors = [], savedState = null)
     winner: null,
     lastActivity: Date.now(),
     players: new Set(),
+
+    // Новые поля для статистики
+    gameStarted: false,       // true после первого REVEAL_CARD
+    gameCompleted: false,     // true после завершения (dedupe)
+    firstCardTime: null,      // timestamp первого открытия карты
+    completionTime: null,     // timestamp завершения игры
+    totalMoves: 0,            // количество открытых карт
   };
 
   if (savedState) {
     game.revealed = savedState.revealed || game.revealed;
     game.currentTeam = savedState.currentTeam || game.currentTeam;
+
+    // Если в savedState есть открытые карты, значит игра уже начиналась
+    const hasRevealedCards = game.revealed.some(r => r === true);
+    if (hasRevealedCards) {
+      game.gameStarted = true;
+      console.log("⚠️ Restored game with revealed cards - marking as already started (no double-count)");
+    }
   }
 
   calculateDerivedState(game);
@@ -276,7 +312,8 @@ io.on("connection", (socket) => {
       console.log("Creating new game state");
       game = createNewGameState(gameKey, words, colors, gameState);
       activeGames.set(gameKey, game);
-      gameStats.addGame(gameKey);
+      gameStats.addActiveGame(gameKey); // Добавляем в активные игры
+      console.log("✅ Added to active games count");
     }
 
     if (game) {
@@ -317,7 +354,8 @@ io.on("connection", (socket) => {
 
     const game = createNewGameState(gameKey, words, colors);
     activeGames.set(gameKey, game);
-    gameStats.addGame(gameKey);
+    gameStats.addActiveGame(gameKey); // Добавляем в активные игры
+    console.log("✅ Added to active games count");
 
     socket.join(gameKey);
     currentGame = gameKey;
@@ -350,7 +388,17 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Первый ход - игра началась
+    if (!game.gameStarted) {
+      game.gameStarted = true;
+      game.firstCardTime = Date.now();
+      game.totalMoves = 0;
+      gameStats.addGame(gameKey);
+      console.log("🎮 Game started! First card opened");
+    }
+
     game.revealed[cardIndex] = true;
+    game.totalMoves++;
     game.lastActivity = Date.now();
 
     const cardColor = game.colors[cardIndex];
@@ -365,9 +413,13 @@ io.on("connection", (socket) => {
     calculateDerivedState(game);
     console.log("Remaining cards after:", { ...game.remainingCards });
 
-    if (game.gameOver && game.winner) {
-      gameStats.completeGame(gameKey);
-      console.log("Game over! Winner:", game.winner);
+    // Игра завершена (с dedupe)
+    if (game.gameOver && !game.gameCompleted) {
+      game.gameCompleted = true;
+      game.completionTime = Date.now();
+      const duration = game.completionTime - game.firstCardTime;
+      gameStats.completeGame(gameKey, duration, game.totalMoves);
+      console.log(`🏆 Game completed! Winner: ${game.winner}, Duration: ${Math.floor(duration / 1000)}s, Moves: ${game.totalMoves}`);
     }
 
     io.to(gameKey).emit("GAME_STATE", game);
@@ -460,6 +512,9 @@ io.on("connection", (socket) => {
         text.trim()
       );
 
+      // Учитываем сообщение в статистике
+      gameStats.addChatMessage();
+
       // Отправляем всем в комнате чата
       console.log(`[Chat] Broadcasting message to chat_${gameKey}:`, message.id);
       io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", message);
@@ -479,7 +534,7 @@ setInterval(() => {
     if (game.lastActivity < oneHourAgo) {
       console.log("Cleaning game:", key);
       console.log("Last activity:", new Date(game.lastActivity));
-      gameStats.removeGame(key);
+      gameStats.removeActiveGame(key);
       activeGames.delete(key);
       cleanedGames++;
     }
