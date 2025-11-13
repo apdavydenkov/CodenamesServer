@@ -55,7 +55,7 @@ class ChatService {
   /**
    * Добавить сообщение в чат
    */
-  async addMessage(gameKey, userId, author, text) {
+  async addMessage(gameKey, userId, author, text, team = null, role = null) {
     const chatData = await this.loadChatHistory(gameKey);
 
     const message = {
@@ -64,6 +64,8 @@ class ChatService {
       userId: userId,
       author: author,
       text: text,
+      team: team,
+      role: role,
       timestamp: new Date().toISOString()
     };
 
@@ -114,6 +116,36 @@ class ChatService {
         }
       }
 
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Обновить команду пользователя во всех его сообщениях в конкретной игре
+   */
+  async updateUserTeamInMessages(gameKey, userId, newTeam, newRole = null) {
+    try {
+      const chatData = await this.loadChatHistory(gameKey);
+
+      let updated = false;
+      chatData.messages = chatData.messages.map(msg => {
+        if (msg.userId === userId) {
+          msg.team = newTeam;
+          if (newRole !== null) {
+            msg.role = newRole;
+          }
+          updated = true;
+        }
+        return msg;
+      });
+
+      if (updated) {
+        chatData.lastUpdated = new Date().toISOString();
+        await this.saveChatHistory(gameKey, chatData);
+      }
+
+      return updated;
     } catch (error) {
       throw error;
     }
