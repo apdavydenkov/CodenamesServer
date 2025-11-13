@@ -399,9 +399,10 @@ io.on("connection", (socket) => {
     }
   };
 
-  socket.on("JOIN_GAME", async ({ gameKey, words, colors, gameState }) => {
+  socket.on("JOIN_GAME", async ({ gameKey, words, colors, gameState, userId }) => {
     console.log("\n=== JOIN_GAME ===");
     console.log("Player", socket.id, "joining game:", gameKey);
+    console.log("UserId:", userId);
     console.log("Has words:", !!words);
     console.log("Has colors:", !!colors);
     console.log("Has game state:", !!gameState);
@@ -410,13 +411,18 @@ io.on("connection", (socket) => {
 
     let game = activeGames.get(gameKey);
 
+    // Приватную игру могут загрузить все, но карточки увидят только участники команд
+    // Проверка canAccessGame ниже определит доступ к контенту
+
     if (!game && words && colors) {
       console.log("Creating new game state");
 
       // Пытаемся загрузить сохраненное состояние команд
+      let wasRestored = false;
       const savedGameState = await gameService.loadGameState(gameKey);
       if (savedGameState) {
         console.log("✅ Found saved game state, restoring teams");
+        wasRestored = true;
         const restoredData = gameService.restoreTeamsFromSaved(savedGameState);
         if (restoredData) {
           gameState = { ...gameState, ...restoredData };
@@ -424,6 +430,21 @@ io.on("connection", (socket) => {
       }
 
       game = createNewGameState(gameKey, words, colors, gameState);
+
+      // Назначить владельца при первом создании игры (если нет сохранённого владельца)
+      // wasRestored = false означает что игра создаётся впервые
+      if (!game.ownerId && userId && !wasRestored) {
+        game.ownerId = userId;
+        saveGameStateAsync(gameKey, game);
+        console.log(`✅ [JOIN_GAME] Set game owner (first creation): ${userId} for game ${gameKey}`);
+      } else {
+        console.log(`[JOIN_GAME] Not setting owner:`, {
+          hasOwner: !!game.ownerId,
+          userId,
+          wasRestored
+        });
+      }
+
       activeGames.set(gameKey, game);
       gameStats.addActiveGame(gameKey); // Добавляем в активные игры
       console.log("✅ Added to active games count");
@@ -447,8 +468,42 @@ io.on("connection", (socket) => {
       console.log("Remaining cards:", game.remainingCards);
       console.log("Revealed cards:", game.revealed.filter((r) => r).length);
 
-      // Отправить состояние игры с командами
-      const state = {
+      // Проверка участника для приватной игры
+      const isOwner = game.ownerId === userId;
+      const isParticipant = !!(userId && game.userToTeam && game.userToTeam.has(userId));
+      const canAccessGame = !game.isPrivate || isOwner || isParticipant;
+
+      console.log(`[Access Control] JOIN_GAME:`, {
+        gameKey,
+        isPrivate: game.isPrivate,
+        ownerId: game.ownerId,
+        userId,
+        isOwner,
+        isParticipant,
+        canAccessGame,
+        wordsLength: canAccessGame ? game.words.length : 0
+      });
+
+      console.log(`Access: canAccessGame=${canAccessGame}, isOwner=${isOwner}, isParticipant=${isParticipant}`);
+
+      // Персональный ответ с canAccessGame и фильтрованным контентом
+      socket.emit("GAME_STATE", {
+        words: canAccessGame ? game.words : [],
+        colors: canAccessGame ? game.colors : [],
+        revealed: canAccessGame ? game.revealed : Array(25).fill(false),
+        currentTeam: game.currentTeam,
+        remainingCards: game.remainingCards,
+        gameOver: game.gameOver,
+        winner: game.winner,
+        teams: serializeTeams(game),
+        ownerId: game.ownerId,
+        isPrivate: game.isPrivate,
+        teamsLocked: game.teamsLocked,
+        canAccessGame: canAccessGame
+      });
+
+      // Broadcast остальным (без canAccessGame, с полным контентом)
+      socket.to(gameKey).emit("GAME_STATE", {
         words: game.words,
         colors: game.colors,
         revealed: game.revealed,
@@ -460,9 +515,7 @@ io.on("connection", (socket) => {
         ownerId: game.ownerId,
         isPrivate: game.isPrivate,
         teamsLocked: game.teamsLocked
-      };
-
-      io.to(gameKey).emit("GAME_STATE", state);
+      });
 
       socket.to(gameKey).emit("PLAYER_JOINED", {
         playerId: socket.id,
@@ -474,13 +527,30 @@ io.on("connection", (socket) => {
     console.log("=== END JOIN_GAME ===\n");
   });
 
-  socket.on("NEW_GAME", ({ gameKey, words, colors }) => {
+  socket.on("NEW_GAME", ({ gameKey, words, colors, userId, makeOwner }) => {
     console.log("\n=== NEW_GAME ===");
     console.log("Creating game:", gameKey);
+    console.log("UserId:", userId);
+    console.log("UserId type:", typeof userId);
+    console.log("MakeOwner:", makeOwner);
+    console.log("Socket ID:", socket.id);
 
     leaveCurrentGame();
 
     const game = createNewGameState(gameKey, words, colors);
+
+    // Установить владельца только если явно запрошено (кнопка "Новая игра")
+    if (makeOwner && userId && !game.ownerId) {
+      game.ownerId = userId;
+      console.log(`✅ [NEW_GAME] Set game owner (explicit): ${userId} for game ${gameKey}`);
+    } else {
+      console.log(`[NEW_GAME] Not setting owner:`, {
+        makeOwner,
+        userId,
+        hasExistingOwner: !!game.ownerId
+      });
+    }
+
     activeGames.set(gameKey, game);
     gameStats.addActiveGame(gameKey); // Добавляем в активные игры
     console.log("✅ Added to active games count");
@@ -492,8 +562,40 @@ io.on("connection", (socket) => {
     console.log("Game created successfully");
     console.log("First player:", socket.id);
 
-    // Отправить состояние игры с командами
-    const state = {
+    // Check if user can access game content
+    const isOwner = game.ownerId === userId;
+    const isParticipant = !!(userId && game.userToTeam && game.userToTeam.has(userId));
+    const canAccessGame = !game.isPrivate || isOwner || isParticipant;
+
+    console.log(`[Access Control] NEW_GAME:`, {
+      gameKey,
+      isPrivate: game.isPrivate,
+      ownerId: game.ownerId,
+      userId,
+      isOwner,
+      isParticipant,
+      canAccessGame,
+      wordsLength: canAccessGame ? game.words.length : 0
+    });
+
+    // Персональный ответ с canAccessGame
+    socket.emit("GAME_STATE", {
+      words: canAccessGame ? game.words : [],
+      colors: canAccessGame ? game.colors : [],
+      revealed: canAccessGame ? game.revealed : Array(25).fill(false),
+      currentTeam: game.currentTeam,
+      remainingCards: game.remainingCards,
+      gameOver: game.gameOver,
+      winner: game.winner,
+      teams: serializeTeams(game),
+      ownerId: game.ownerId,
+      isPrivate: game.isPrivate,
+      teamsLocked: game.teamsLocked,
+      canAccessGame: canAccessGame
+    });
+
+    // Broadcast остальным (без canAccessGame)
+    socket.to(gameKey).emit("GAME_STATE", {
       words: game.words,
       colors: game.colors,
       revealed: game.revealed,
@@ -505,9 +607,7 @@ io.on("connection", (socket) => {
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
       teamsLocked: game.teamsLocked
-    };
-
-    io.to(gameKey).emit("GAME_STATE", state);
+    });
     console.log("=== END NEW_GAME ===\n");
   });
 
@@ -524,17 +624,13 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Проверка: набор закрыт?
-    if (game.teamsLocked && game.ownerId !== userId) {
-      socket.emit("GAME_ERROR", { message: "Набор в команды закрыт", code: "TEAMS_LOCKED" });
-      return;
-    }
+    // Проверить текущую команду пользователя
+    const currentUserTeam = game.userToTeam.get(userId);
+    const isInTeam = !!(currentUserTeam && (currentUserTeam.team === 'blue' || currentUserTeam.team === 'red'));
 
-    // Удалить из предыдущей команды
-    removeFromTeams(game, userId);
-
-    // Наблюдатель
+    // Наблюдатель - всегда разрешен
     if (team === "spectator") {
+      removeFromTeams(game, userId);
       game.teams.spectators.add(userId);
       game.userToTeam.set(userId, { team: "spectator", role: "spectator", username });
 
@@ -551,6 +647,17 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Проверка для вступления в команду (blue/red):
+    // Если НЕ в команде И набор закрыт И не владелец → блокировать
+    if (!isInTeam && game.teamsLocked && game.ownerId !== userId) {
+      socket.emit("GAME_ERROR", { message: "Набор в команды закрыт", code: "TEAMS_LOCKED" });
+      console.log(`└─ ⚠️ BLOCKED: Teams locked, user not in team`);
+      return;
+    }
+
+    // Удалить из старой команды один раз перед добавлением в новую
+    removeFromTeams(game, userId);
+
     // Капитан
     if (role === "captain") {
       if (hasCaptain(game, team)) {
@@ -559,7 +666,7 @@ io.on("connection", (socket) => {
           code: "CAPTAIN_TAKEN"
         });
 
-        // Автоматически сделать игроком
+        // Сделать игроком
         game.teams[team].players.add(userId);
         game.userToTeam.set(userId, { team, role: "player", username });
 
@@ -655,8 +762,8 @@ io.on("connection", (socket) => {
   });
 
   // LOCK_TEAMS - закрыть/открыть набор в команды
-  socket.on("LOCK_TEAMS", async ({ gameKey, userId }) => {
-    console.log(`\n=== LOCK_TEAMS: userId=${userId} ===`);
+  socket.on("LOCK_TEAMS", async ({ gameKey, userId, username }) => {
+    console.log(`\n=== LOCK_TEAMS: userId=${userId}, username=${username} ===`);
 
     const game = activeGames.get(gameKey);
     if (!game || game.ownerId !== userId) {
@@ -666,8 +773,13 @@ io.on("connection", (socket) => {
 
     game.teamsLocked = !game.teamsLocked;
 
-    const msg = game.teamsLocked ? "Набор в команды закрыт" : "Набор в команды открыт";
-    const savedMsg = await chatService.addMessage(gameKey, null, "Система", msg);
+    const userTeam = game.userToTeam.get(userId);
+    const actualUsername = username || userTeam?.username || 'Игрок';
+    const team = userTeam?.team || null;
+    const role = userTeam?.role || null;
+
+    const msg = game.teamsLocked ? "Я закрыл набор в команды" : "Я открыл набор в команды";
+    const savedMsg = await chatService.addMessage(gameKey, userId, actualUsername, msg, team, role);
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
     io.to(gameKey).emit("GAME_SETTINGS_UPDATE", { teamsLocked: game.teamsLocked });
@@ -679,8 +791,8 @@ io.on("connection", (socket) => {
   });
 
   // SET_PRIVATE - сделать игру приватной/публичной
-  socket.on("SET_PRIVATE", async ({ gameKey, userId, isPrivate }) => {
-    console.log(`\n=== SET_PRIVATE: userId=${userId}, isPrivate=${isPrivate} ===`);
+  socket.on("SET_PRIVATE", async ({ gameKey, userId, username, isPrivate }) => {
+    console.log(`\n=== SET_PRIVATE: userId=${userId}, username=${username}, isPrivate=${isPrivate} ===`);
 
     const game = activeGames.get(gameKey);
     if (!game || game.ownerId !== userId) {
@@ -690,8 +802,13 @@ io.on("connection", (socket) => {
 
     game.isPrivate = isPrivate;
 
-    const msg = isPrivate ? "Игра стала приватной" : "Игра стала публичной";
-    const savedMsg = await chatService.addMessage(gameKey, null, "Система", msg);
+    const userTeam = game.userToTeam.get(userId);
+    const actualUsername = username || userTeam?.username || 'Игрок';
+    const team = userTeam?.team || null;
+    const role = userTeam?.role || null;
+
+    const msg = isPrivate ? "Я сделал игру приватной" : "Я сделал игру публичной";
+    const savedMsg = await chatService.addMessage(gameKey, userId, actualUsername, msg, team, role);
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
     io.to(gameKey).emit("GAME_SETTINGS_UPDATE", { isPrivate: game.isPrivate });
@@ -810,6 +927,7 @@ io.on("connection", (socket) => {
       console.log(`🏆 Game completed! Winner: ${game.winner}, Duration: ${Math.floor(duration / 1000)}s, Moves: ${game.totalMoves}`);
     }
 
+    // Не отправляем canAccessGame в broadcast - каждый клиент уже знает свой доступ
     const state = {
       words: game.words,
       colors: game.colors,
@@ -837,9 +955,21 @@ io.on("connection", (socket) => {
   // === CHAT EVENTS ===
 
   // Присоединиться к чату игры
-  socket.on("JOIN_CHAT", async ({ gameKey }) => {
+  socket.on("JOIN_CHAT", async ({ gameKey, userId }) => {
     try {
-      console.log(`[Chat] ${socket.id} joining chat for game: ${gameKey}`);
+      console.log(`[Chat] ${socket.id} (${userId}) joining chat for game: ${gameKey}`);
+
+      // Check if game is private - молча не пускаем в чат
+      const game = activeGames.get(gameKey);
+      if (game && game.isPrivate) {
+        const isOwner = game.ownerId === userId;
+        const isParticipant = !!(userId && game.userToTeam && game.userToTeam.has(userId));
+
+        if (!isOwner && !isParticipant) {
+          console.log(`[Chat] Access denied: Private game, user ${userId} is not a participant`);
+          return;
+        }
+      }
 
       // Присоединяем к комнате чата (можем быть в нескольких одновременно)
       const chatRoom = `chat_${gameKey}`;
@@ -895,6 +1025,18 @@ io.on("connection", (socket) => {
 
       console.log(`[Chat] ✅ PIN verified for ${author}`);
 
+      // Check if game is private - молча блокируем отправку
+      const game = activeGames.get(gameKey);
+      if (game && game.isPrivate) {
+        const isOwner = game.ownerId === userId;
+        const isParticipant = !!(userId && game.userToTeam && game.userToTeam.has(userId));
+
+        if (!isOwner && !isParticipant) {
+          console.log(`[Chat] Message blocked: Private game, user ${userId} is not a participant`);
+          return;
+        }
+      }
+
       // Валидация текста
       if (!text || !text.trim()) {
         socket.emit("CHAT_ERROR", { message: "Message cannot be empty" });
@@ -909,7 +1051,7 @@ io.on("connection", (socket) => {
       // Получаем команду и роль пользователя
       let userTeam = null;
       let userRole = null;
-      const game = activeGames.get(gameKey);
+      // game already declared above
       if (game) {
         const teamInfo = game.userToTeam.get(userId);
         if (teamInfo) {
