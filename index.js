@@ -244,12 +244,12 @@ const mergeGameStates = (baseState, newState) => {
   return { ...baseState, revealed };
 };
 
-const createNewGameState = (gameKey, words = [], colors = [], savedState = null) => {
+const createNewGameState = (gameKey, words = [], colors = [], savedState = null, startingTeam) => {
   const game = {
     words,
     colors,
     revealed: Array(25).fill(false),
-    currentTeam: "blue",
+    currentTeam: startingTeam,
     remainingCards: { blue: 0, red: 0 },
     gameOver: false,
     winner: null,
@@ -266,6 +266,9 @@ const createNewGameState = (gameKey, words = [], colors = [], savedState = null)
     // Командная система
     ownerId: null,            // userId создателя игры
     isPrivate: false,         // приватная игра
+
+    // Система подсказок капитана
+    currentHint: null,        // { word, number, attempts, timestamp } или null
     teamsLocked: false,       // набор закрыт
 
     teams: {
@@ -429,7 +432,11 @@ io.on("connection", (socket) => {
         }
       }
 
-      game = createNewGameState(gameKey, words, colors, gameState);
+      // Вычисляем startingTeam по количеству карточек (у кого 9 - тот ходит первым)
+      const blueCount = colors.filter(c => c === "blue").length;
+      const startingTeam = blueCount === 9 ? "blue" : "red";
+
+      game = createNewGameState(gameKey, words, colors, gameState, startingTeam);
 
       // Назначить владельца при первом создании игры (если нет сохранённого владельца)
       // wasRestored = false означает что игра создаётся впервые
@@ -498,6 +505,7 @@ io.on("connection", (socket) => {
         teams: serializeTeams(game),
         ownerId: game.ownerId,
         isPrivate: game.isPrivate,
+        currentHint: game.currentHint,
         teamsLocked: game.teamsLocked,
         canAccessGame: canAccessGame
       });
@@ -514,6 +522,7 @@ io.on("connection", (socket) => {
         teams: serializeTeams(game),
         ownerId: game.ownerId,
         isPrivate: game.isPrivate,
+        currentHint: game.currentHint,
         teamsLocked: game.teamsLocked
       });
 
@@ -527,7 +536,7 @@ io.on("connection", (socket) => {
     console.log("=== END JOIN_GAME ===\n");
   });
 
-  socket.on("NEW_GAME", ({ gameKey, words, colors, userId, makeOwner }) => {
+  socket.on("NEW_GAME", ({ gameKey, words, colors, startingTeam, userId, makeOwner }) => {
     console.log("\n=== NEW_GAME ===");
     console.log("Creating game:", gameKey);
     console.log("UserId:", userId);
@@ -537,7 +546,7 @@ io.on("connection", (socket) => {
 
     leaveCurrentGame();
 
-    const game = createNewGameState(gameKey, words, colors);
+    const game = createNewGameState(gameKey, words, colors, null, startingTeam);
 
     // Установить владельца только если явно запрошено (кнопка "Новая игра")
     if (makeOwner && userId && !game.ownerId) {
@@ -590,6 +599,7 @@ io.on("connection", (socket) => {
       teams: serializeTeams(game),
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
+      currentHint: game.currentHint,
       teamsLocked: game.teamsLocked,
       canAccessGame: canAccessGame
     });
@@ -606,6 +616,7 @@ io.on("connection", (socket) => {
       teams: serializeTeams(game),
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
+      currentHint: game.currentHint,
       teamsLocked: game.teamsLocked
     });
     console.log("=== END NEW_GAME ===\n");
@@ -819,6 +830,138 @@ io.on("connection", (socket) => {
     console.log(`✅ Game private: ${game.isPrivate}`);
   });
 
+  // Обработчик подсказки капитана
+  socket.on("GIVE_HINT", async ({ gameKey, userId, username, word, number }) => {
+    console.log("\n┌─ GIVE_HINT ────────────────────────────────");
+    console.log(`│ Captain: ${username} (${userId})`);
+    console.log(`│ Word: ${word}, Number: ${number}`);
+
+    const game = activeGames.get(gameKey);
+    if (!game) {
+      console.log("└─ ❌ FAIL: Game not found");
+      return;
+    }
+
+    const userTeam = getUserTeam(game, userId);
+
+    // Проверка 1: Пользователь - капитан
+    if (!userTeam || userTeam.role !== "captain") {
+      console.log("└─ ❌ FAIL: Not a captain");
+      socket.emit("GAME_ERROR", {
+        message: "Только капитан может давать подсказки",
+        code: "NOT_CAPTAIN"
+      });
+      return;
+    }
+
+    // Проверка 2: Это ход его команды
+    if (userTeam.team !== game.currentTeam) {
+      console.log(`└─ ❌ FAIL: Not team's turn (${userTeam.team} vs ${game.currentTeam})`);
+      socket.emit("GAME_ERROR", {
+        message: "Сейчас ход другой команды",
+        code: "NOT_YOUR_TURN"
+      });
+      return;
+    }
+
+    // Проверка 3: Нет активной подсказки
+    if (game.currentHint) {
+      console.log("└─ ❌ FAIL: Hint already given");
+      socket.emit("GAME_ERROR", {
+        message: "Подсказка уже дана. Дождитесь окончания хода",
+        code: "HINT_ALREADY_GIVEN"
+      });
+      return;
+    }
+
+    // Проверка 4: Слово не пустое
+    if (!word || !word.trim()) {
+      console.log("└─ ❌ FAIL: Empty word");
+      socket.emit("GAME_ERROR", {
+        message: "Введите слово подсказки",
+        code: "EMPTY_WORD"
+      });
+      return;
+    }
+
+    // Проверка 5: Число 0-9
+    const hintNumber = parseInt(number);
+    if (isNaN(hintNumber) || hintNumber < 0 || hintNumber > 9) {
+      console.log("└─ ❌ FAIL: Invalid number");
+      socket.emit("GAME_ERROR", {
+        message: "Число должно быть от 0 до 9",
+        code: "INVALID_NUMBER"
+      });
+      return;
+    }
+
+    // Создать подсказку
+    game.currentHint = {
+      word: word.trim().toUpperCase(),
+      number: hintNumber,
+      attempts: 0,
+      timestamp: Date.now()
+    };
+
+    console.log(`└─ ✅ SUCCESS: Hint created`);
+
+    // Broadcast подсказку всем
+    io.to(gameKey).emit("HINT_GIVEN", {
+      team: game.currentTeam,
+      hint: game.currentHint
+    });
+
+    // Отправить сообщение в чат
+    const teamName = userTeam.team === "blue" ? "Синяя" : "Красная";
+    const chatMessage = `${teamName} команда, я отправил вам шифровку! Скорее смотрите пока она не сгорела!`;
+    const savedMsg = await chatService.addMessage(gameKey, userId, username, chatMessage, userTeam.team, userTeam.role);
+    io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
+
+    // Сохранить состояние
+    saveGameStateAsync(gameKey, game);
+
+    console.log(`[Chat] Hint notification sent to chat`);
+  });
+
+  // Обработчик передачи хода
+  socket.on("END_TURN", async ({ gameKey, userId }) => {
+    console.log("\n┌─ END_TURN ─────────────────────────────────");
+    console.log(`│ User: ${userId}`);
+
+    const game = activeGames.get(gameKey);
+    if (!game) {
+      console.log("└─ ❌ FAIL: Game not found");
+      return;
+    }
+
+    const userTeam = getUserTeam(game, userId);
+
+    // Проверка: Игрок текущей команды
+    if (!userTeam || userTeam.team !== game.currentTeam) {
+      console.log(`└─ ❌ FAIL: Not current team (user: ${userTeam?.team}, current: ${game.currentTeam})`);
+      socket.emit("GAME_ERROR", {
+        message: "Только игроки текущей команды могут передать ход",
+        code: "NOT_YOUR_TURN"
+      });
+      return;
+    }
+
+    // Переключить ход
+    const oldTeam = game.currentTeam;
+    game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
+    game.currentHint = null;
+
+    console.log(`└─ ✅ SUCCESS: Turn ended (${oldTeam} → ${game.currentTeam})`);
+
+    // Broadcast всем
+    io.to(gameKey).emit("TURN_ENDED", {
+      currentTeam: game.currentTeam
+    });
+
+    // Сохранить состояние
+    saveGameStateAsync(gameKey, game);
+  });
+
   socket.on("REVEAL_CARD", async ({ gameKey, cardIndex, userId, username }) => {
     console.log("\n=== REVEAL_CARD ===");
     console.log("Game key:", gameKey);
@@ -893,9 +1036,31 @@ io.on("connection", (socket) => {
     const cardColor = game.colors[cardIndex];
     console.log("Card color:", cardColor);
 
-    if (cardColor !== game.currentTeam || cardColor === "neutral") {
-      console.log("Switching team from", game.currentTeam);
+    // Логика подсказок и переключения хода
+    if (cardColor === game.currentTeam) {
+      // Правильная карточка своей команды
+      if (game.currentHint) {
+        game.currentHint.attempts++;
+        console.log(`✅ Correct card! Attempts: ${game.currentHint.attempts}/${game.currentHint.number}`);
+
+        const maxAttempts = game.currentHint.number === 0
+          ? game.remainingCards[game.currentTeam]
+          : game.currentHint.number + 1;
+
+        if (game.currentHint.attempts >= maxAttempts) {
+          console.log("⏭️ Hint limit reached, switching turn");
+          game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
+          game.currentHint = null;
+        }
+      } else {
+        // Нет подсказки - старое поведение (не переключаем ход)
+        console.log("✅ Correct card, no hint - continue");
+      }
+    } else {
+      // Неправильная карточка (чужая, нейтральная, убийца) - переключаем ход
+      console.log("❌ Wrong card, switching team from", game.currentTeam);
       game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
+      game.currentHint = null;
       console.log("to", game.currentTeam);
     }
 
@@ -939,6 +1104,7 @@ io.on("connection", (socket) => {
       teams: serializeTeams(game),
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
+      currentHint: game.currentHint,
       teamsLocked: game.teamsLocked
     };
 
