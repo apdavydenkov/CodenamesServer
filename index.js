@@ -345,7 +345,7 @@ function removeFromTeams(game, userId) {
 }
 
 function serializeTeams(game) {
-  return {
+  const serialized = {
     blue: {
       captain: game.teams.blue.captain ? {
         userId: game.teams.blue.captain,
@@ -371,6 +371,13 @@ function serializeTeams(game) {
       return info ? { userId, username: info.username } : null;
     }).filter(Boolean)
   };
+
+  console.log('[serializeTeams] Captains state:', {
+    blueCaptain: serialized.blue.captain,
+    redCaptain: serialized.red.captain
+  });
+
+  return serialized;
 }
 
 // Асинхронное сохранение состояния игры
@@ -494,6 +501,7 @@ io.on("connection", (socket) => {
       console.log(`Access: canAccessGame=${canAccessGame}, isOwner=${isOwner}, isParticipant=${isParticipant}`);
 
       // Персональный ответ с canAccessGame и фильтрованным контентом
+      console.log(`[HintIcon] JOIN_GAME sending currentHint:`, JSON.stringify(game.currentHint));
       socket.emit("GAME_STATE", {
         words: canAccessGame ? game.words : [],
         colors: canAccessGame ? game.colors : [],
@@ -708,7 +716,10 @@ io.on("connection", (socket) => {
       // Сохраняем состояние игры
       saveGameStateAsync(gameKey, game);
 
-      io.to(gameKey).emit("TEAMS_UPDATE", { teams: serializeTeams(game) });
+      const teamsData = serializeTeams(game);
+      console.log(`[TEAMS_UPDATE] Broadcasting captain update to room: ${gameKey}`);
+      console.log(`[TEAMS_UPDATE] Sockets in room:`, io.sockets.adapter.rooms.get(gameKey)?.size || 0);
+      io.to(gameKey).emit("TEAMS_UPDATE", { teams: teamsData });
       socket.emit("JOIN_TEAM_SUCCESS", { team, role: "captain" });
       console.log(`✅ ${username} became captain of ${team}`);
       return;
@@ -895,6 +906,45 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Проверка 6: Команды готовы (баг #3)
+    console.log(`[HintValidation] Checking team readiness...`);
+    console.log(`[HintValidation] Full game.teams structure:`, JSON.stringify(game.teams, null, 2));
+
+    console.log(`[HintValidation] Blue team:`, {
+      captain: game.teams?.blue?.captain || null,
+      players: game.teams?.blue?.players?.size || 0,
+      fullPlayers: game.teams?.blue?.players || []
+    });
+    console.log(`[HintValidation] Red team:`, {
+      captain: game.teams?.red?.captain || null,
+      players: game.teams?.red?.players?.size || 0,
+      fullPlayers: game.teams?.red?.players || []
+    });
+
+    const blueReady = game.teams?.blue?.captain && game.teams?.blue?.players?.size >= 1;
+    const redReady = game.teams?.red?.captain && game.teams?.red?.players?.size >= 1;
+
+    console.log(`[HintValidation] Blue ready check:`, {
+      hasCaptain: !!game.teams?.blue?.captain,
+      playersCount: game.teams?.blue?.players?.size || 0,
+      isReady: blueReady
+    });
+    console.log(`[HintValidation] Red ready check:`, {
+      hasCaptain: !!game.teams?.red?.captain,
+      playersCount: game.teams?.red?.players?.size || 0,
+      isReady: redReady
+    });
+
+    if (!blueReady || !redReady) {
+      console.log(`[HintValidation] ❌ Teams not ready: blue=${blueReady}, red=${redReady}`);
+      socket.emit("GAME_ERROR", {
+        message: "Обе команды должны быть готовы (капитан + минимум 1 игрок)",
+        code: "TEAMS_NOT_READY"
+      });
+      return;
+    }
+    console.log(`[HintValidation] ✅ Teams ready`);
+
     // Создать подсказку
     game.currentHint = {
       word: word.trim().toUpperCase(),
@@ -904,12 +954,18 @@ io.on("connection", (socket) => {
     };
 
     console.log(`└─ ✅ SUCCESS: Hint created`);
+    console.log(`[HintIcon] Created hint:`, JSON.stringify(game.currentHint));
+    console.log(`[HintIcon] Current team BEFORE broadcast: ${game.currentTeam}`);
 
     // Broadcast подсказку всем
+    console.log(`[HintPopup] Broadcasting HINT_GIVEN to room: ${gameKey}`);
+    console.log(`[HintPopup] Clients in room:`, io.sockets.adapter.rooms.get(gameKey)?.size || 0);
+    console.log(`[HintPopup] Broadcasting for team: ${game.currentTeam}`);
     io.to(gameKey).emit("HINT_GIVEN", {
       team: game.currentTeam,
       hint: game.currentHint
     });
+    console.log(`[HintPopup] HINT_GIVEN broadcast complete for team: ${game.currentTeam}`);
 
     // Отправить сообщение в чат
     const teamName = userTeam.team === "blue" ? "Синяя" : "Красная";
@@ -946,14 +1002,28 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Проверка: Капитан не может передать ход
+    if (userTeam.role === 'captain') {
+      console.log(`└─ ❌ FAIL: Captain cannot end turn`);
+      socket.emit("GAME_ERROR", {
+        message: "Капитан не может передать ход",
+        code: "CAPTAIN_CANNOT_END_TURN"
+      });
+      return;
+    }
+
     // Переключить ход
     const oldTeam = game.currentTeam;
     game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
     game.currentHint = null;
 
-    console.log(`└─ ✅ SUCCESS: Turn ended (${oldTeam} → ${game.currentTeam})`);
+    console.log(`└─ ✅ SUCCESS: Turn ended`);
+    console.log(`   Old team: ${oldTeam}`);
+    console.log(`   New team: ${game.currentTeam}`);
+    console.log(`   Hint cleared: ${game.currentHint === null}`);
 
     // Broadcast всем
+    console.log(`   Broadcasting TURN_ENDED to room ${gameKey}...`);
     io.to(gameKey).emit("TURN_ENDED", {
       currentTeam: game.currentTeam
     });
