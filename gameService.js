@@ -71,6 +71,7 @@ class GameService {
         revealed: gameState.revealed,
         currentTeam: gameState.currentTeam,
         currentHint: gameState.currentHint,
+        simpleMode: gameState.simpleMode,
         gameOver: gameState.gameOver,
         winner: gameState.winner,
         lastUpdated: new Date().toISOString()
@@ -118,6 +119,7 @@ class GameService {
       revealed: savedState.revealed,
       currentTeam: savedState.currentTeam,
       currentHint: savedState.currentHint || null,
+      simpleMode: savedState.simpleMode,
       gameOver: savedState.gameOver,
       winner: savedState.winner
     };
