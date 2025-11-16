@@ -271,6 +271,9 @@ const createNewGameState = (gameKey, words = [], colors = [], savedState = null,
     currentHint: null,        // { word, number, attempts, timestamp } или null
     teamsLocked: false,       // набор закрыт
 
+    // Простой режим (для офлайн-игры)
+    simpleMode: true,        // простой режим включён по умолчанию
+
     teams: {
       blue: {
         captain: null,        // userId капитана
@@ -345,22 +348,34 @@ function removeFromTeams(game, userId) {
 }
 
 function serializeTeams(game) {
+  // Получить капитана команды (универсально для обоих режимов)
+  const getCaptain = (team) => {
+    // В простом режиме ищем в userToTeam
+    if (game.simpleMode) {
+      for (const [userId, data] of game.userToTeam.entries()) {
+        if (data.team === team && data.role === 'captain') {
+          return { userId, username: data.username };
+        }
+      }
+      return null;
+    }
+    // В обычном режиме берём из teams
+    return game.teams[team].captain ? {
+      userId: game.teams[team].captain,
+      username: game.teams[team].captainName
+    } : null;
+  };
+
   const serialized = {
     blue: {
-      captain: game.teams.blue.captain ? {
-        userId: game.teams.blue.captain,
-        username: game.teams.blue.captainName
-      } : null,
+      captain: getCaptain('blue'),
       players: Array.from(game.teams.blue.players).map(userId => {
         const info = game.userToTeam.get(userId);
         return info ? { userId, username: info.username } : null;
       }).filter(Boolean)
     },
     red: {
-      captain: game.teams.red.captain ? {
-        userId: game.teams.red.captain,
-        username: game.teams.red.captainName
-      } : null,
+      captain: getCaptain('red'),
       players: Array.from(game.teams.red.players).map(userId => {
         const info = game.userToTeam.get(userId);
         return info ? { userId, username: info.username } : null;
@@ -371,11 +386,6 @@ function serializeTeams(game) {
       return info ? { userId, username: info.username } : null;
     }).filter(Boolean)
   };
-
-  console.log('[serializeTeams] Captains state:', {
-    blueCaptain: serialized.blue.captain,
-    redCaptain: serialized.red.captain
-  });
 
   return serialized;
 }
@@ -515,6 +525,7 @@ io.on("connection", (socket) => {
         isPrivate: game.isPrivate,
         currentHint: game.currentHint,
         teamsLocked: game.teamsLocked,
+        simpleMode: game.simpleMode,
         canAccessGame: canAccessGame
       });
 
@@ -531,7 +542,8 @@ io.on("connection", (socket) => {
         ownerId: game.ownerId,
         isPrivate: game.isPrivate,
         currentHint: game.currentHint,
-        teamsLocked: game.teamsLocked
+        teamsLocked: game.teamsLocked,
+        simpleMode: game.simpleMode
       });
 
       socket.to(gameKey).emit("PLAYER_JOINED", {
@@ -609,6 +621,7 @@ io.on("connection", (socket) => {
       isPrivate: game.isPrivate,
       currentHint: game.currentHint,
       teamsLocked: game.teamsLocked,
+      simpleMode: game.simpleMode,
       canAccessGame: canAccessGame
     });
 
@@ -625,7 +638,8 @@ io.on("connection", (socket) => {
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
       currentHint: game.currentHint,
-      teamsLocked: game.teamsLocked
+      teamsLocked: game.teamsLocked,
+      simpleMode: game.simpleMode
     });
     console.log("=== END NEW_GAME ===\n");
   });
@@ -679,7 +693,8 @@ io.on("connection", (socket) => {
 
     // Капитан
     if (role === "captain") {
-      if (hasCaptain(game, team)) {
+      // В обычном режиме - проверяем что капитан свободен
+      if (!game.simpleMode && hasCaptain(game, team)) {
         socket.emit("GAME_ERROR", {
           message: "Капитан этой команды уже выбран",
           code: "CAPTAIN_TAKEN"
@@ -704,12 +719,19 @@ io.on("connection", (socket) => {
         return;
       }
 
-      game.teams[team].captain = userId;
-      game.teams[team].captainName = username;
+      // В обычном режиме - устанавливаем единственного капитана
+      // В простом режиме - просто добавляем ещё одного капитана
+      if (!game.simpleMode) {
+        game.teams[team].captain = userId;
+        game.teams[team].captainName = username;
+      }
+
       game.userToTeam.set(userId, { team, role: "captain", username });
 
       const teamRu = team === "blue" ? "синей" : "красной";
-      const msg = `Я стал капитаном ${teamRu} команды`;
+      const msg = game.simpleMode
+        ? `Я стал капитаном ${teamRu} команды`
+        : `Я стал капитаном ${teamRu} команды`;
       const savedMsg = await chatService.addMessage(gameKey, userId, username, msg, team, 'captain');
       io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
 
@@ -721,7 +743,7 @@ io.on("connection", (socket) => {
       console.log(`[TEAMS_UPDATE] Sockets in room:`, io.sockets.adapter.rooms.get(gameKey)?.size || 0);
       io.to(gameKey).emit("TEAMS_UPDATE", { teams: teamsData });
       socket.emit("JOIN_TEAM_SUCCESS", { team, role: "captain" });
-      console.log(`✅ ${username} became captain of ${team}`);
+      console.log(`✅ ${username} became captain of ${team} (simpleMode: ${game.simpleMode})`);
       return;
     }
 
@@ -841,6 +863,44 @@ io.on("connection", (socket) => {
     console.log(`✅ Game private: ${game.isPrivate}`);
   });
 
+  // TOGGLE_SIMPLE_MODE - переключить простой режим
+  socket.on("TOGGLE_SIMPLE_MODE", async ({ gameKey, userId, enabled }) => {
+    console.log(`\n=== TOGGLE_SIMPLE_MODE: userId=${userId}, enabled=${enabled} ===`);
+
+    const game = activeGames.get(gameKey);
+    if (!game || game.ownerId !== userId) {
+      console.log(`⚠️ Not owner or game not found`);
+      return;
+    }
+
+    // Проверка: нельзя переключить если игра уже началась в простом режиме
+    const gameStartedInSimpleMode = game.simpleMode && game.revealed.some(r => r === true);
+    if (gameStartedInSimpleMode) {
+      socket.emit("GAME_ERROR", {
+        message: "Нельзя изменить режим после начала игры",
+        code: "SIMPLE_MODE_LOCKED"
+      });
+      console.log(`⚠️ Cannot toggle simple mode - game already started`);
+      return;
+    }
+
+    game.simpleMode = enabled;
+
+    // При включении простого режима: сбросить шифровку
+    if (enabled) {
+      game.currentHint = null;
+    }
+
+    io.to(gameKey).emit("GAME_SETTINGS_UPDATE", {
+      simpleMode: enabled,
+      currentHint: enabled ? null : game.currentHint
+    });
+
+    saveGameStateAsync(gameKey, game);
+
+    console.log(`✅ Simple mode: ${game.simpleMode}`);
+  });
+
   // Обработчик подсказки капитана
   socket.on("GIVE_HINT", async ({ gameKey, userId, username, word, number }) => {
     console.log("\n┌─ GIVE_HINT ────────────────────────────────");
@@ -850,6 +910,12 @@ io.on("connection", (socket) => {
     const game = activeGames.get(gameKey);
     if (!game) {
       console.log("└─ ❌ FAIL: Game not found");
+      return;
+    }
+
+    // Игнорировать в простом режиме
+    if (game.simpleMode) {
+      console.log("└─ ⚠️ SKIP: Simple mode enabled");
       return;
     }
 
@@ -1054,41 +1120,45 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // ПРОВЕРКИ КОМАНДЫ/РОЛИ
-    const userTeam = getUserTeam(game, userId);
-    console.log("User team:", userTeam);
+    // ПРОВЕРКИ КОМАНДЫ/РОЛИ (только для обычного режима)
+    if (!game.simpleMode) {
+      const userTeam = getUserTeam(game, userId);
+      console.log("User team:", userTeam);
 
-    // Проверка 1: Игрок выбрал команду
-    if (!userTeam || userTeam.team === "spectator") {
-      console.log("❌ User has no team or is spectator");
-      socket.emit("GAME_ERROR", {
-        message: "Выберите команду для участия в игре",
-        code: "NO_TEAM"
-      });
-      return;
+      // Проверка 1: Игрок выбрал команду
+      if (!userTeam || userTeam.team === "spectator") {
+        console.log("❌ User has no team or is spectator");
+        socket.emit("GAME_ERROR", {
+          message: "Выберите команду для участия в игре",
+          code: "NO_TEAM"
+        });
+        return;
+      }
+
+      // Проверка 2: Капитаны не могут открывать карточки
+      if (userTeam.role === "captain") {
+        console.log("❌ Captain cannot reveal cards");
+        socket.emit("GAME_ERROR", {
+          message: "Капитаны не могут открывать карточки",
+          code: "CAPTAIN_CANNOT_REVEAL"
+        });
+        return;
+      }
+
+      // Проверка 3: Это ход команды игрока
+      if (userTeam.team !== game.currentTeam) {
+        console.log(`❌ Not user's team turn (user: ${userTeam.team}, current: ${game.currentTeam})`);
+        socket.emit("GAME_ERROR", {
+          message: "Сейчас ход другой команды",
+          code: "NOT_YOUR_TURN"
+        });
+        return;
+      }
+
+      console.log("✅ All checks passed, revealing card");
+    } else {
+      console.log("✅ Simple mode - skipping team/role checks");
     }
-
-    // Проверка 2: Капитаны не могут открывать карточки
-    if (userTeam.role === "captain") {
-      console.log("❌ Captain cannot reveal cards");
-      socket.emit("GAME_ERROR", {
-        message: "Капитаны не могут открывать карточки",
-        code: "CAPTAIN_CANNOT_REVEAL"
-      });
-      return;
-    }
-
-    // Проверка 3: Это ход команды игрока
-    if (userTeam.team !== game.currentTeam) {
-      console.log(`❌ Not user's team turn (user: ${userTeam.team}, current: ${game.currentTeam})`);
-      socket.emit("GAME_ERROR", {
-        message: "Сейчас ход другой команды",
-        code: "NOT_YOUR_TURN"
-      });
-      return;
-    }
-
-    console.log("✅ All checks passed, revealing card");
 
     // Первый ход - игра началась
     if (!game.gameStarted) {
@@ -1106,32 +1176,34 @@ io.on("connection", (socket) => {
     const cardColor = game.colors[cardIndex];
     console.log("Card color:", cardColor);
 
-    // Логика подсказок и переключения хода
-    if (cardColor === game.currentTeam) {
-      // Правильная карточка своей команды
-      if (game.currentHint) {
-        game.currentHint.attempts++;
-        console.log(`✅ Correct card! Attempts: ${game.currentHint.attempts}/${game.currentHint.number}`);
+    // Логика подсказок и переключения хода (только для обычного режима)
+    if (!game.simpleMode) {
+      if (cardColor === game.currentTeam) {
+        // Правильная карточка своей команды
+        if (game.currentHint) {
+          game.currentHint.attempts++;
+          console.log(`✅ Correct card! Attempts: ${game.currentHint.attempts}/${game.currentHint.number}`);
 
-        const maxAttempts = game.currentHint.number === 0
-          ? game.remainingCards[game.currentTeam]
-          : game.currentHint.number + 1;
+          const maxAttempts = game.currentHint.number === 0
+            ? game.remainingCards[game.currentTeam]
+            : game.currentHint.number + 1;
 
-        if (game.currentHint.attempts >= maxAttempts) {
-          console.log("⏭️ Hint limit reached, switching turn");
-          game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
-          game.currentHint = null;
+          if (game.currentHint.attempts >= maxAttempts) {
+            console.log("⏭️ Hint limit reached, switching turn");
+            game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
+            game.currentHint = null;
+          }
+        } else {
+          // Нет подсказки - старое поведение (не переключаем ход)
+          console.log("✅ Correct card, no hint - continue");
         }
       } else {
-        // Нет подсказки - старое поведение (не переключаем ход)
-        console.log("✅ Correct card, no hint - continue");
+        // Неправильная карточка (чужая, нейтральная, убийца) - переключаем ход
+        console.log("❌ Wrong card, switching team from", game.currentTeam);
+        game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
+        game.currentHint = null;
+        console.log("to", game.currentTeam);
       }
-    } else {
-      // Неправильная карточка (чужая, нейтральная, убийца) - переключаем ход
-      console.log("❌ Wrong card, switching team from", game.currentTeam);
-      game.currentTeam = game.currentTeam === "blue" ? "red" : "blue";
-      game.currentHint = null;
-      console.log("to", game.currentTeam);
     }
 
     calculateDerivedState(game);
@@ -1139,7 +1211,7 @@ io.on("connection", (socket) => {
 
     // Системное сообщение в чат
     const wordRevealed = game.words[cardIndex];
-    const teamRu = userTeam.team === "blue" ? "синей" : "красной";
+    const userTeam = !game.simpleMode ? getUserTeam(game, userId) : null;
     const colorRu = {
       blue: "синюю",
       red: "красную",
@@ -1149,7 +1221,11 @@ io.on("connection", (socket) => {
 
     const wordCleaned = wordRevealed.replace(/\u00AD/g, ''); // Убрать мягкие переносы
     const moveMessage = `Я открыл ${colorRu} карточку: ${wordCleaned}`;
-    const savedMsg = await chatService.addMessage(gameKey, userId, username, moveMessage, userTeam.team, userTeam.role);
+    const savedMsg = await chatService.addMessage(
+      gameKey, userId, username, moveMessage,
+      userTeam?.team ?? null,
+      userTeam?.role ?? null
+    );
     io.to(`chat_${gameKey}`).emit("NEW_MESSAGE", savedMsg);
     console.log(`[Chat] Move message from ${username}: ${moveMessage}`);
 
@@ -1175,7 +1251,8 @@ io.on("connection", (socket) => {
       ownerId: game.ownerId,
       isPrivate: game.isPrivate,
       currentHint: game.currentHint,
-      teamsLocked: game.teamsLocked
+      teamsLocked: game.teamsLocked,
+      simpleMode: game.simpleMode
     };
 
     io.to(gameKey).emit("GAME_STATE", state);
@@ -1324,22 +1401,56 @@ io.on("connection", (socket) => {
   });
 });
 
-setInterval(() => {
+setInterval(async () => {
   console.log("\n=== CLEANUP ===");
   const oneHourAgo = Date.now() - 3600000;
   let cleanedGames = 0;
+  let deletedFiles = 0;
 
-  activeGames.forEach((game, key) => {
+  for (const [key, game] of activeGames.entries()) {
     if (game.lastActivity < oneHourAgo) {
       console.log("Cleaning game:", key);
       console.log("Last activity:", new Date(game.lastActivity));
+
+      // Проверяем есть ли раскрытые карточки
+      const hasRevealedCards = game.revealed && game.revealed.some(r => r === true);
+
+      if (!hasRevealedCards) {
+        console.log("Game has no revealed cards, deleting files:", key);
+
+        // Удаляем файл игры
+        const gameFilePath = gameService.getGameFilePath(key);
+        try {
+          await fs.unlink(gameFilePath);
+          console.log("Deleted game file:", key);
+        } catch (err) {
+          if (err.code !== 'ENOENT') {
+            console.error("Error deleting game file:", err);
+          }
+        }
+
+        // Удаляем файл чата
+        const chatFilePath = path.join(__dirname, 'data', `chat_${key}.json`);
+        try {
+          await fs.unlink(chatFilePath);
+          console.log("Deleted chat file:", key);
+        } catch (err) {
+          if (err.code !== 'ENOENT') {
+            console.error("Error deleting chat file:", err);
+          }
+        }
+
+        deletedFiles++;
+      }
+
       gameStats.removeActiveGame(key);
       activeGames.delete(key);
       cleanedGames++;
     }
-  });
+  }
 
   console.log("Games cleaned:", cleanedGames);
+  console.log("Files deleted (unused games):", deletedFiles);
   console.log("Remaining games:", activeGames.size);
   console.log("=== END CLEANUP ===\n");
 
